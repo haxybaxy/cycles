@@ -67,6 +67,41 @@ class BotClient {
            (a == Direction::west && b == Direction::east);
   }
 
+  bool wouldFormPartialSquare(const std::vector<Direction>& history, Direction newMove) {
+    if (history.size() < 2) return false;
+
+    // Get the last two moves
+    Direction lastMove = history.back();
+    Direction secondLastMove = history[history.size() - 2];
+
+    // Check for three identical moves in a row
+    if (history.size() >= 2 && lastMove == secondLastMove && newMove == lastMove) {
+        return true;
+    }
+
+    // Check for moves that would complete 3/4 of a square
+    // Example: north -> east -> south or west -> north -> east
+    if (lastMove != secondLastMove &&
+        ((newMove == Direction::north && lastMove == Direction::east && secondLastMove == Direction::south) ||
+         (newMove == Direction::east && lastMove == Direction::south && secondLastMove == Direction::west) ||
+         (newMove == Direction::south && lastMove == Direction::west && secondLastMove == Direction::north) ||
+         (newMove == Direction::west && lastMove == Direction::north && secondLastMove == Direction::east) ||
+         (newMove == Direction::north && lastMove == Direction::west && secondLastMove == Direction::south) ||
+         (newMove == Direction::east && lastMove == Direction::north && secondLastMove == Direction::west) ||
+         (newMove == Direction::south && lastMove == Direction::east && secondLastMove == Direction::north) ||
+         (newMove == Direction::west && lastMove == Direction::south && secondLastMove == Direction::east))) {
+        return true;
+    }
+
+    return false;
+  }
+
+  // Add new helper method to check for potential traps
+  bool isPathToFreedom(const sf::Vector2i& position, int minRequiredSpace = 10) {
+    std::vector<std::vector<bool>> visited(state.gridWidth, std::vector<bool>(state.gridHeight, false));
+    return floodFill(position, visited) >= minRequiredSpace;
+  }
+
   Direction decideMove() {
     std::vector<Direction> directions = {
         Direction::north,
@@ -75,21 +110,59 @@ class BotClient {
         Direction::west
     };
 
-    int maxArea = -1;
+    int maxScore = -1;
     Direction bestDirection = Direction::north;
-
-    // Store scores for each direction
-    std::vector<std::pair<Direction, int>> direction_scores;
 
     for (auto direction : directions) {
         if (!is_valid_move(direction)) continue;
 
+        // Increase penalty for moves that would form partial squares
+        if (wouldFormPartialSquare(last_moves, direction)) {
+            spdlog::debug("{}: Skipping direction {} to avoid partial square",
+                         name, getDirectionValue(direction));
+            continue;
+        }
+
         sf::Vector2i newPos = my_player.position + getDirectionVector(direction);
 
-        // Initialize the visited grid
-        std::vector<std::vector<bool>> visited(state.gridWidth, std::vector<bool>(state.gridHeight, false));
+        // Check if move leads to a dead end
+        if (!isPathToFreedom(newPos, 15)) {
+            spdlog::debug("{}: Skipping direction {} - leads to potential trap",
+                         name, getDirectionValue(direction));
+            continue;
+        }
 
-        // Mark occupied cells as visited
+        // Calculate risk factors
+        int adjacent_walls = 0;
+        int diagonal_walls = 0;
+        int player_walls = 0;  // New counter for nearby player trails
+
+        // Check adjacent cells for walls and player trails
+        for (const auto& dir : directions) {
+            sf::Vector2i checkPos = newPos + getDirectionVector(dir);
+            if (!state.isInsideGrid(checkPos)) {
+                adjacent_walls++;
+            } else if (state.getGridCell(checkPos) != 0) {
+                adjacent_walls++;
+                if (state.getGridCell(checkPos) == my_player.id) {
+                    player_walls++;  // Extra penalty for own trails
+                }
+            }
+        }
+
+        // Check diagonal cells
+        static const std::vector<sf::Vector2i> diagonals = {
+            {-1, -1}, {1, -1}, {-1, 1}, {1, 1}
+        };
+        for (const auto& diag : diagonals) {
+            sf::Vector2i checkPos = newPos + diag;
+            if (!state.isInsideGrid(checkPos) || state.getGridCell(checkPos) != 0) {
+                diagonal_walls++;
+            }
+        }
+
+        // Initialize visited grid and perform flood fill
+        std::vector<std::vector<bool>> visited(state.gridWidth, std::vector<bool>(state.gridHeight, false));
         for (int x = 0; x < state.gridWidth; ++x) {
             for (int y = 0; y < state.gridHeight; ++y) {
                 if (state.getGridCell({x, y}) != 0) {
@@ -98,33 +171,44 @@ class BotClient {
             }
         }
 
-        // Perform flood fill from the new position
         int area = floodFill(newPos, visited);
+        int score = area * 2;  // Increase weight of available space
 
-        // Penalize moves that would create repetitive patterns
+        // Enhanced penalty system
+        if (adjacent_walls >= 2) {
+            score /= (adjacent_walls * 3);  // Increased penalty
+        }
+
+        if (player_walls > 0) {
+            score /= (player_walls * 4);  // Heavy penalty for own trails
+        }
+
+        if (diagonal_walls >= 2) {
+            score /= (diagonal_walls * 2);
+        }
+
+        // Stronger penalties for repetitive patterns
         if (!last_moves.empty()) {
-            // Penalize reversing direction
-            if (!last_moves.empty() && areOppositeDirections(direction, last_moves.back())) {
-                area /= 2;
+            if (areOppositeDirections(direction, last_moves.back())) {
+                score /= 8;  // Increased penalty for reversing
             }
 
-            // Penalize repeated moves
             if (last_moves.size() >= 2) {
                 int repetition_penalty = 0;
                 for (size_t i = 0; i < last_moves.size() - 1; i++) {
                     if (last_moves[i] == direction) {
-                        repetition_penalty += 2;
+                        repetition_penalty += 5;  // Increased penalty
                     }
                 }
-                area = area / (1 + repetition_penalty);
+                score = score / (1 + repetition_penalty);
             }
         }
 
-        direction_scores.push_back({direction, area});
-        spdlog::debug("{}: Direction {} has adjusted area {}", name, getDirectionValue(direction), area);
+        spdlog::debug("{}: Direction {} has score {} (area: {}, adj_walls: {}, diag_walls: {})",
+                     name, getDirectionValue(direction), score, area, adjacent_walls, diagonal_walls);
 
-        if (area > maxArea) {
-            maxArea = area;
+        if (score > maxScore) {
+            maxScore = score;
             bestDirection = direction;
         }
     }
@@ -135,7 +219,7 @@ class BotClient {
         last_moves.erase(last_moves.begin());
     }
 
-    spdlog::debug("{}: Chose direction {} with max area {}", name, getDirectionValue(bestDirection), maxArea);
+    spdlog::debug("{}: Chose direction {} with score {}", name, getDirectionValue(bestDirection), maxScore);
     return bestDirection;
   }
 

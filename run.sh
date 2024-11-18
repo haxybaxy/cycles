@@ -1,4 +1,4 @@
-export CYCLES_PORT=50018
+export CYCLES_PORT=50097
 
 cat<<EOF> config.yaml
 gameHeight: 500
