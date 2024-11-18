@@ -14,6 +14,8 @@ class BotClient {
   GameState state;
   Player my_player;
   std::mt19937 rng;
+  std::vector<Direction> last_moves;  // Store last N moves
+  const size_t move_history_size = 4; // Remember last 4 moves
 
   bool is_valid_move(Direction direction) {
     auto new_pos = my_player.position + getDirectionVector(direction);
@@ -58,6 +60,13 @@ class BotClient {
     return area;
   }
 
+  bool areOppositeDirections(Direction a, Direction b) {
+    return (a == Direction::north && b == Direction::south) ||
+           (a == Direction::south && b == Direction::north) ||
+           (a == Direction::east && b == Direction::west) ||
+           (a == Direction::west && b == Direction::east);
+  }
+
   Direction decideMove() {
     std::vector<Direction> directions = {
         Direction::north,
@@ -67,44 +76,63 @@ class BotClient {
     };
 
     int maxArea = -1;
-    Direction bestDirection = Direction::north; // Default to north if no moves are valid
+    Direction bestDirection = Direction::north;
+
+    // Store scores for each direction
+    std::vector<std::pair<Direction, int>> direction_scores;
 
     for (auto direction : directions) {
-      if (!is_valid_move(direction)) continue;
+        if (!is_valid_move(direction)) continue;
 
-      sf::Vector2i newPos = my_player.position + getDirectionVector(direction);
+        sf::Vector2i newPos = my_player.position + getDirectionVector(direction);
 
-      // Initialize the visited grid
-      std::vector<std::vector<bool>> visited(state.gridWidth, std::vector<bool>(state.gridHeight, false));
+        // Initialize the visited grid
+        std::vector<std::vector<bool>> visited(state.gridWidth, std::vector<bool>(state.gridHeight, false));
 
-      // Mark occupied cells as visited
-      for (int x = 0; x < state.gridWidth; ++x) {
-        for (int y = 0; y < state.gridHeight; ++y) {
-          if (state.getGridCell({x, y}) != 0) {
-            visited[x][y] = true;
-          }
+        // Mark occupied cells as visited
+        for (int x = 0; x < state.gridWidth; ++x) {
+            for (int y = 0; y < state.gridHeight; ++y) {
+                if (state.getGridCell({x, y}) != 0) {
+                    visited[x][y] = true;
+                }
+            }
         }
-      }
 
-      // Perform flood fill from the new position
-      int area = floodFill(newPos, visited);
+        // Perform flood fill from the new position
+        int area = floodFill(newPos, visited);
 
-      spdlog::debug("{}: Direction {} has reachable area {}", name, getDirectionValue(direction), area);
+        // Penalize moves that would create repetitive patterns
+        if (!last_moves.empty()) {
+            // Penalize reversing direction
+            if (!last_moves.empty() && areOppositeDirections(direction, last_moves.back())) {
+                area /= 2;
+            }
 
-      if (area > maxArea) {
-        maxArea = area;
-        bestDirection = direction;
-      }
+            // Penalize repeated moves
+            if (last_moves.size() >= 2) {
+                int repetition_penalty = 0;
+                for (size_t i = 0; i < last_moves.size() - 1; i++) {
+                    if (last_moves[i] == direction) {
+                        repetition_penalty += 2;
+                    }
+                }
+                area = area / (1 + repetition_penalty);
+            }
+        }
+
+        direction_scores.push_back({direction, area});
+        spdlog::debug("{}: Direction {} has adjusted area {}", name, getDirectionValue(direction), area);
+
+        if (area > maxArea) {
+            maxArea = area;
+            bestDirection = direction;
+        }
     }
 
-    // If no valid moves are found (surrounded), stay in the current direction or pick any valid move
-    if (maxArea == -1) {
-      for (auto direction : directions) {
-        if (is_valid_move(direction)) {
-          bestDirection = direction;
-          break;
-        }
-      }
+    // Update move history
+    last_moves.push_back(bestDirection);
+    if (last_moves.size() > move_history_size) {
+        last_moves.erase(last_moves.begin());
     }
 
     spdlog::debug("{}: Chose direction {} with max area {}", name, getDirectionValue(bestDirection), maxArea);
